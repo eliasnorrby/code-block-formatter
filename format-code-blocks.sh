@@ -1,5 +1,79 @@
 #!/usr/bin/env bash
 
+# Format code blocks in markdown files.
+
+SUPPORTED_LANGUAGES='yaml,javascript'
+ERROR_PATTERN='^[[:space:]]*\[error\] stdin:'
+
+# defaults
+# LANGUAGES='yaml,javascript'
+LANGUAGES='yaml'
+SEARCHPATH='.'
+
+ERROR="Bad usage, see ${0##*/} -h"
+
+read -r -d "" USAGE <<EOF
+Short description
+
+Usage: ${0##*/} [-lph] <command>
+
+Commands:
+  format        Format files
+  fix           Fix errors in files
+  analyze       Display info about blocks in files
+
+Options:
+  -l LANGUAGES  Process blocks with specified languages (comma-separated) (Default: "$LANGUAGES")
+  -p PATH       Path to files (Default: '.')
+  -h            Show usage
+
+Example:
+  ${0##*/} -l yaml,javascript,typescript format
+
+EOF
+
+if [ "$1" = "--help" ]; then
+  echo "$USAGE" && exit 0
+fi
+
+while getopts l:h opt; do
+  case $opt in
+    l) LANGUAGES=$OPTARG                   ;;
+    p) SEARCHPATH=$OPTARG                        ;;
+    h) echo "$USAGE" && exit 0             ;;
+    *) echo "$ERROR" && exit 1             ;;
+  esac
+done
+
+CMD=${*:$OPTIND:1}
+
+OTHER_ARGS=${*:$OPTIND+1}
+
+if [ -n "$OTHER_ARGS" ]; then
+  echo "ERROR: Unprocessed positional arguments: $OTHER_ARGS"
+  exit 1
+fi
+
+shift
+
+setup() {
+  L_PATTERN=$(lang_list_to_regexp)
+}
+
+lang_list_to_regexp() {
+  validate_languages
+  echo "($(tr ',' '|' <<<"$LANGUAGES"))"
+}
+
+validate_languages() {
+  for language in $(tr ',' ' ' <<<"$LANGUAGES" | xargs); do
+    if ! [ "${SUPPORTED_LANGUAGES#*$language}" != "${SUPPORTED_LANGUAGES}" ]; then
+      echo_e "Usupported language: $language"
+      exit 1
+    fi
+  done
+}
+
 # get line number from grep ouput
 line_number() {
   cut -d ":" -f 1
@@ -19,7 +93,7 @@ find_next_pattern() {
 find_next_block_start() {
   local start=$1 file=$2
 
-  find_next_pattern "$start" "$file" '^[[:space:]]*```ya?ml[[:space:]]*$'
+  find_next_pattern "$start" "$file" '^[[:space:]]*```'"$L_PATTERN"'[[:space:]]*$'
 }
 
 # call find_next_pattern with code black ending pattern
@@ -33,7 +107,7 @@ find_next_block_end() {
 find_next_error() {
   local start=$1 file=$2
 
-  find_next_pattern "$start" "$file" '^\[error\] stdin:'
+  find_next_pattern "$start" "$file" "$ERROR_PATTERN"
 }
 
 # print file contents between two line number, inclusively
@@ -52,12 +126,9 @@ print_between_non_inclusive() {
 
 # format stdin with prettier
 format() {
-  prettier --parser yaml --print-width 200 "$@"
-}
-
-# format stdin with ruamel.yaml
-format_ruamel() {
-  python -c 'import sys;from ruamel.yaml import YAML;yaml=YAML();yaml.dump(yaml.load(sys.stdin),sys.stdout)'
+  local parser=$1
+  shift
+  prettier --parser "$parser" --print-width 200 "$@"
 }
 
 remove_indent() {
@@ -70,49 +141,93 @@ prepend_indent() {
   sed "s/^/${indent}/"
 }
 
+get_block_language() {
+  local line=$1 file=$2
+  sed "${line}q;d" "$file" | cut -d '`' -f 4 | xargs
+}
+
+language_to_parser() {
+  local language=$1
+  case $language in
+    javascript)
+      echo "babel"
+      ;;
+    *)
+      echo "$language"
+      ;;
+  esac
+}
+
+get_parser() {
+  local line=$1 file=$2
+  language_to_parser "$(get_block_language "$line" "$file")"
+}
+
 # given a starting line number and file, attempt to format the contents of the
 # next code block
-update_block() {
-  local start=$1 file=$2 blockstart blockend indent
+handle_block() {
+  local start=$1 file=$2 blockstart blockend indent parser
 
   blockstart=$(find_next_block_start "$start" "$file")
   blockend=$(find_next_block_end "$start" "$file")
 
   indent=$(sed "${blockstart}q;d" "$file" | grep -o '^[[:space:]]*')
 
+  parser=$(get_parser "$blockstart" "$file")
+
+  print_block() {
+    print_between_non_inclusive "$blockstart" "$blockend" "$file"
+  }
+
   format_block() {
-    print_between_non_inclusive "$blockstart" "$blockend" "$file" | remove_indent "$indent" | format "$@"
+    print_block | remove_indent "$indent" | format "$parser" "$@"
   }
 
-  format_block_ruamel() {
-    print_between_non_inclusive "$blockstart" "$blockend" "$file" | format_ruamel
+  block_has_error() {
+    print_block | grep "$ERROR_PATTERN" >/dev/null 2>&1
   }
 
-  format_check() {
-    format_block --check
+  prettier_can_handle_block() {
+    format_block > /dev/null 2>&1
   }
 
-  if format_block > /dev/null 2>&1; then
-    if format_check > /dev/null 2>&1; then
-      echo "Block at $blockstart: OK"
+  block_is_properly_formatted() {
+    format_block --check >/dev/null 2>&1
+  }
+
+  update_block() {
+    format_block | prepend_indent "$indent" > formatted
+    write_to_block "$blockstart" "$blockend" "$file" formatted
+    write_result "CHANGED"
+  }
+
+  write_result() {
+    echo "Block at $blockstart: $1"
+  }
+
+  write_error_to_block() {
+    2>&1 format_block | head -1 > error
+    sed -i.bak "${blockstart}r error" "$file"
+
+    write_result "ERROR"
+    rm "$file".bak
+    rm error
+  }
+
+  if prettier_can_handle_block; then
+    if block_is_properly_formatted; then
+      write_result "OK"
       return
     fi
-
-    format_block | prepend_indent "$indent" > formatted
-    # format_block_ruamel > formatted
-
-    write_to_block "$blockstart" "$blockend" "$file" formatted
-
-    echo "Block at $blockstart: CHANGED"
+    update_block
     return
   fi
 
-  2>&1 format_block | head -1 > error
-  sed -i.bak "${blockstart}r error" "$file"
-
-  echo "Block at $blockstart: ERROR"
-  rm "$file".bak
-  rm error
+  if block_has_error; then
+    write_result "SKIPPING (has error)"
+    return
+  fi
+  write_error_to_block
 }
 
 # given a starting line number and a file, edit the next code block using
@@ -160,7 +275,7 @@ format_file() {
   next=$(find_next_block_start 1 "$file")
 
   while [ -n "$next" ]; do
-    update_block "$next" "$file"
+    handle_block "$next" "$file"
     next=$(find_next_block_start "$((next + 1))" "$file")
   done
 }
@@ -175,7 +290,7 @@ process_errors() {
     # [error] is inside the block
     blockstart=$((next - 1))
     edit_block "$blockstart" "$file"
-    update_block "$blockstart" "$file"
+    handle_block "$blockstart" "$file"
     new_next=$(find_next_error "$next" "$file")
 
     if [ "$new_next" = "$next" ]; then
@@ -234,7 +349,7 @@ handle_persistent_error() {
 
 # get number of code blocks in file
 num_blocks() {
-  grep -E '^[[:space:]]*```ya?ml[[:space:]]*$' "$1" -c
+  grep -E '^[[:space:]]*```'"$L_PATTERN"'[[:space:]]*$' "$1" -c
 }
 
 # get number of erronous code blocks in file
@@ -247,8 +362,7 @@ process_files() {
   local files=$1
 
   for file in $files; do
-    echo "About to format $file with $(num_blocks "$file") yaml blocks"
-    # read -p "Enter to continue" -r
+    echo "About to format $file with $(num_blocks "$file") code blocks"
     format_file "$file"
   done
 }
@@ -267,13 +381,13 @@ process_files_errors() {
 
 # given a path and a pattern, find matching files
 find_files() {
-  local searchpath=$1 pattern=$2
-  find "$searchpath" -type f -name "$pattern"
+  local pattern='*.md'
+  find "$SEARCHPATH" -type f -name "$pattern"
 }
 
 find_and_format_files() {
-  local searchpath=${1:-.} pattern=${2:-'*.md'} files
-  files=$(find_files "$searchpath" "$pattern")
+  local files
+  files=$(find_files)
   process_files "$files"
 
 
@@ -281,12 +395,15 @@ find_and_format_files() {
 }
 
 find_and_format_errors() {
-  local searchpath=${1:-.} pattern=${2:-'*.md'} files errors
-  files=$(find_files "$searchpath" "$pattern")
+  local files errors
+  files=$(find_files)
 
-  errors=$(grep -c '\[error\] stdin:' $files | grep -v ':0$')
+  errors=$(grep -Ec "$ERROR_PATTERN" $files | grep -v ':0$')
 
-  [ -z "$errors" ] || [ "$errors" = 0 ] && return 0
+  if [ -z "$errors" ] || [ "$errors" = 0 ]; then
+    echo "No errors to fix"
+    return 0
+  fi
 
   echo "Errors:"
   echo "$errors"
@@ -298,10 +415,11 @@ analyze() {
   echo "To be implemented"
 }
 
-cmd=$1
-shift
+setup
 
-case $cmd in
+[ -z "$CMD" ] && echo "No command specified, see ${0##*/} -h" && exit 1
+
+case $CMD in
   format)
     find_and_format_files "$@"
     ;;
@@ -312,7 +430,7 @@ case $cmd in
     analyze "$@"
     ;;
   *)
-    echo "Invalid command: $cmd"
+    echo "Invalid command: $CMD"
     echo "See ${0##*/} -h"
     exit 1
     ;;
