@@ -195,7 +195,7 @@ echo_e() {
 # error and return $next based on the choice
 handle_persistent_error() {
   local file=$1 next=$2 new_next=$3 blockstart choice
-  local prompt_msg=" Edit again? [y/s/i/q] (yes/skip/ignore/quit)"
+  local prompt_msg=" Edit again? [y/s/i/q] (yes/skip/ignore/quit) "
   local choice_regexp='([yY]|[sS]|[iI]|[qQ])'
 
   blockstart=$((next - 1))
@@ -271,20 +271,49 @@ find_files() {
   find "$searchpath" -type f -name "$pattern"
 }
 
-main() {
+find_and_format_files() {
   local searchpath=${1:-.} pattern=${2:-'*.md'} files
   files=$(find_files "$searchpath" "$pattern")
   process_files "$files"
 
-  echo "Errors:"
-
-  grep -rc '\[error\] stdin:' . | grep -v ':0$'
-
-  read -p "Process errors?" -r
-
-  process_files_errors "$files"
 
   echo "Done!"
 }
 
-main "$@"
+find_and_format_errors() {
+  local searchpath=${1:-.} pattern=${2:-'*.md'} files errors
+  files=$(find_files "$searchpath" "$pattern")
+
+  errors=$(grep -c '\[error\] stdin:' $files | grep -v ':0$')
+
+  [ -z "$errors" ] || [ "$errors" = 0 ] && return 0
+
+  echo "Errors:"
+  echo "$errors"
+
+  process_files_errors "$files"
+}
+
+analyze() {
+  echo "To be implemented"
+}
+
+cmd=$1
+shift
+
+case $cmd in
+  format)
+    find_and_format_files "$@"
+    ;;
+  fix)
+    find_and_format_errors "$@"
+    ;;
+  analyze)
+    analyze "$@"
+    ;;
+  *)
+    echo "Invalid command: $cmd"
+    echo "See ${0##*/} -h"
+    exit 1
+    ;;
+esac
