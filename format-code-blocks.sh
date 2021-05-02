@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 
-# file=$1
-
 # get line number from grep ouput
 line_number() {
   cut -d ":" -f 1
 }
 
-# get list of line numbers where yaml code blocks start
-# start_lines() {
-#   grep -E '^```ya?ml' "$1" -n | line_number
-# }
-
+# given a line number, a file and a pattern, return the next line on which
+# pattern occurs, or nothing if there is no match
 find_next_pattern() {
   local start=$1 file=$2 pattern=$3 relative
 
@@ -20,24 +15,28 @@ find_next_pattern() {
   [ -n "$relative" ] && echo "$((start + relative - 1))"
 }
 
+# call find_next_pattern with code black starting pattern
 find_next_block_start() {
   local start=$1 file=$2
 
   find_next_pattern "$start" "$file" '^[[:space:]]*```ya?ml[[:space:]]*$'
 }
 
+# call find_next_pattern with code black ending pattern
 find_next_block_end() {
   local start=$1 file=$2
 
   find_next_pattern "$start" "$file" '^[[:space:]]*```[[:space:]]*$'
 }
 
+# call find_next_pattern with error pattern
 find_next_error() {
   local start=$1 file=$2
 
   find_next_pattern "$start" "$file" '^\[error\] stdin:'
 }
 
+# print file contents between two line number, inclusively
 print_between() {
   local start=$1 end=$2 file=$3
   sed -n "${start},${end}p" "$file"
@@ -51,10 +50,12 @@ print_between_non_inclusive() {
   print_between "$start" "$end" "$file"
 }
 
+# format stdin with prettier
 format() {
   prettier --parser yaml --print-width 200 "$@"
 }
 
+# format stdin with ruamel.yaml
 format_ruamel() {
   python -c 'import sys;from ruamel.yaml import YAML;yaml=YAML();yaml.dump(yaml.load(sys.stdin),sys.stdout)'
 }
@@ -69,6 +70,8 @@ prepend_indent() {
   sed "s/^/${indent}/"
 }
 
+# given a starting line number and file, attempt to format the contents of the
+# next code block
 update_block() {
   local start=$1 file=$2 blockstart blockend indent
 
@@ -112,6 +115,8 @@ update_block() {
   rm error
 }
 
+# given a starting line number and a file, edit the next code block using
+# $EDITOR
 edit_block() {
   local start=$1 file=$2 blockstart blockend tmpfile editor=${EDITOR:-vim}
 
@@ -137,6 +142,9 @@ edit_block() {
   write_to_block "$blockstart" "$blockend" "$file" "$tmpfile"
 }
 
+# given boundaries of a codeblock, a target file and a source file, overwrite
+# the contents of the codeblock in the target file with the contents of the
+# source file
 write_to_block() {
   local blockstart=$1 blockend=$2 file=$3 fromfile=$4
 
@@ -146,6 +154,7 @@ write_to_block() {
   rm "$fromfile"
 }
 
+# given a file, attempt to format all code blocks
 format_file() {
   local file=$1 next
   next=$(find_next_block_start 1 "$file")
@@ -156,6 +165,8 @@ format_file() {
   done
 }
 
+# given a file, allow user to edit each erronous code block and attempt to
+# format again
 process_errors() {
   local file=$1 next new_next blockstart
   next=$(find_next_error 1 "$file")
@@ -168,52 +179,70 @@ process_errors() {
     new_next=$(find_next_error "$next" "$file")
 
     if [ "$new_next" = "$next" ]; then
-      echo ">> Block at line $blockstart still has errors."
-
-      local prompt_msg=" Edit again? [y/s/i/q] (yes/skip/ignore/quit)"
-      local choice
-      read -p "$prompt_msg" -n 1 -r choice
-      echo
-      local choice_regexp='([yY]|[sS]|[iI]|[qQ])'
-      while [[ ! $choice =~ $choice_regexp ]]; do
-        echo "Please type y or s or i or q"
-        read -p "$prompt_msg" -n 1 -r choice
-        echo
-      done
-
-      case $choice in
-        [yY])
-          next=$new_next
-          ;;
-        [nS])
-          next=$(find_next_error "$((new_next + 1))" "$file")
-          ;;
-        [iI])
-          sed -i.bak "${next}d" "$file" && rm "${file}.bak"
-          next=$(find_next_error "$next" "$file")
-          ;;
-        [qQ])
-          exit 0
-          ;;
-        *)
-          echo "Invalid choice: $choice"
-          exit 1
-          ;;
-      esac
+      next=$(handle_persistent_error "$file" "$next" "$new_next")
     else
       next=$new_next
     fi
   done
 }
 
+# echo to stderr
+echo_e() {
+  echo "$@" >&2
+}
+
+# prompt user for how to proceed when a code block edit does not resolve an
+# error and return $next based on the choice
+handle_persistent_error() {
+  local file=$1 next=$2 new_next=$3 blockstart choice
+  local prompt_msg=" Edit again? [y/s/i/q] (yes/skip/ignore/quit)"
+  local choice_regexp='([yY]|[sS]|[iI]|[qQ])'
+
+  blockstart=$((next - 1))
+
+  echo_e ">> Block at line $blockstart still has errors."
+
+  read -p "$prompt_msg" -n 1 -r choice
+  echo_e
+  while [[ ! $choice =~ $choice_regexp ]]; do
+    echo_e "Please type y or s or i or q"
+    read -p "$prompt_msg" -n 1 -r choice
+    echo_e
+  done
+
+  case $choice in
+    [yY])
+      next=$new_next
+      ;;
+    [nS])
+      next=$(find_next_error "$((new_next + 1))" "$file")
+      ;;
+    [iI])
+      sed -i.bak "${next}d" "$file" && rm "${file}.bak"
+      next=$(find_next_error "$next" "$file")
+      ;;
+    [qQ])
+      exit 0
+      ;;
+    *)
+      echo_e "Invalid choice: $choice"
+      exit 1
+      ;;
+  esac
+  echo "$next"
+}
+
+# get number of code blocks in file
 num_blocks() {
   grep -E '^[[:space:]]*```ya?ml[[:space:]]*$' "$1" -c
 }
 
+# get number of erronous code blocks in file
 num_errors() {
   grep '\[error\] stdin:' "$1" -c
 }
 
+# given a list of files, format the code blocks within them
 process_files() {
   local files=$1
 
@@ -224,6 +253,7 @@ process_files() {
   done
 }
 
+# given a list of files, process erronous code blocks within them
 process_files_errors() {
   local files=$1
   for file in $files; do
@@ -235,6 +265,7 @@ process_files_errors() {
   done
 }
 
+# given a path and a pattern, find matching files
 find_files() {
   local searchpath=$1 pattern=$2
   find "$searchpath" -type f -name "$pattern"
