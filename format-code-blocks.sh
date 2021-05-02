@@ -359,11 +359,14 @@ num_errors() {
 
 # given a list of files, format the code blocks within them
 process_files() {
-  local files=$1
+  local files=$1 blocks
 
   for file in $files; do
-    echo "About to format $file with $(num_blocks "$file") code blocks"
-    format_file "$file"
+    blocks=$(num_blocks "$file")
+    if [ "$blocks" != 0 ]; then
+      echo "About to format $file with $blocks code blocks"
+      format_file "$file"
+    fi
   done
 }
 
@@ -379,10 +382,17 @@ process_files_errors() {
   done
 }
 
-# given a path and a pattern, find matching files
+# given a path, find matching files
 find_files() {
   local pattern='*.md'
-  find "$SEARCHPATH" -type f -name "$pattern"
+  if [ -d "$SEARCHPATH" ]; then
+    find "$SEARCHPATH" -type f -name "$pattern"
+  elif [ -f "$SEARCHPATH" ]; then
+    echo "$SEARCHPATH"
+  else
+    echo "Bad path: $SEARCHPATH"
+    exit 1
+  fi
 }
 
 find_and_format_files() {
