@@ -36,7 +36,7 @@ if [ "$1" = "--help" ]; then
   echo "$USAGE" && exit 0
 fi
 
-while getopts l:h opt; do
+while getopts l:p:h opt; do
   case $opt in
     l) LANGUAGES=$OPTARG                   ;;
     p) SEARCHPATH=$OPTARG                        ;;
